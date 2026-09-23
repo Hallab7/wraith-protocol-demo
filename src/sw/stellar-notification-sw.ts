@@ -38,6 +38,11 @@ import {
   pruneNotificationIds,
   releaseNotificationId,
 } from './notificationStore';
+import {
+  retentionErrorFromRpcMessage,
+  retentionGapFromError,
+  type RetentionGap,
+} from '../lib/stellar/scannerCursor';
 export {};
 
 declare const self: ServiceWorkerGlobalScope;
@@ -159,9 +164,33 @@ async function fetchAnnouncementEvents(
     }),
   });
   const data = await response.json();
+  if (data.error?.message) {
+    const retentionError = retentionErrorFromRpcMessage(startLedger, String(data.error.message));
+    throw retentionError ?? new Error(String(data.error.message));
+  }
   const events = data.result?.events || [];
   const latestLedger = await fetchLatestLedger();
   return { events, latestLedger };
+}
+
+async function notifyRetentionGap(publicKey: string, gap: RetentionGap): Promise<void> {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of clients) {
+    client.postMessage({ type: 'STELLAR_SCAN_RETENTION_GAP', publicKey, ...gap });
+  }
+}
+
+async function scanStoredKey(
+  db: IDBDatabase,
+  storedKey: StoredViewingKey,
+  startLedger: number,
+): Promise<void> {
+  const { events, latestLedger } = await fetchAnnouncementEvents(startLedger);
+  if (events.length > 0) {
+    console.log(`[wraith-sw] Found ${events.length} events for ${storedKey.publicKey}`);
+    // TODO: decrypt viewing key and scan with the SDK when bundled in the worker.
+  }
+  await updateLastScannedLedger(db, storedKey.publicKey, latestLedger + 1);
 }
 
 // ─── push payload helpers ─────────────────────────────────────────────────────
@@ -196,15 +225,17 @@ async function handleSync(_event: ExtendableEvent): Promise<void> {
 
     for (const storedKey of allKeys) {
       const startLedger = storedKey.lastScannedLedger || 1;
-      const { events, latestLedger } = await fetchAnnouncementEvents(startLedger);
-
-      if (events.length > 0) {
-        // TODO: decrypt viewing key and run full SDK scan once SDK is
-        // available in SW context. For now we surface a generic alert.
-        console.log(`[wraith-sw] Found ${events.length} events for ${storedKey.publicKey}`);
+      try {
+        await scanStoredKey(db, storedKey, startLedger);
+      } catch (error) {
+        const gap = retentionGapFromError(error);
+        if (!gap) throw error;
+        if (storedKey.lastScannedLedger === undefined) {
+          await scanStoredKey(db, storedKey, gap.oldestAvailableLedger);
+        } else {
+          await notifyRetentionGap(storedKey.publicKey, gap);
+        }
       }
-
-      await updateLastScannedLedger(db, storedKey.publicKey, latestLedger);
     }
 
     db.close();
@@ -284,6 +315,44 @@ self.addEventListener('notificationclick', (event: NotificationEvent) => {
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
   const { type, publicKey, encryptedViewingKey, encryptedSpendingPubKey, encryptedSpendingScalar } =
     event.data ?? {};
+
+  if (type === 'RECOVER_SCAN_CURSOR') {
+    event.waitUntil(
+      (async () => {
+        const db = await openDB();
+        try {
+          const recoveryLedger = Number(event.data.oldestAvailableLedger);
+          if (
+            typeof publicKey !== 'string' ||
+            !Number.isSafeInteger(recoveryLedger) ||
+            recoveryLedger <= 0
+          ) {
+            return;
+          }
+          const storedKey = await new Promise<StoredViewingKey | undefined>((resolve, reject) => {
+            const request = db
+              .transaction(STORE_NAME, 'readonly')
+              .objectStore(STORE_NAME)
+              .get(publicKey);
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => resolve(request.result);
+          });
+          if (!storedKey) return;
+          await scanStoredKey(db, storedKey, recoveryLedger);
+          const clients = await self.clients.matchAll({
+            type: 'window',
+            includeUncontrolled: true,
+          });
+          clients.forEach((client) =>
+            client.postMessage({ type: 'STELLAR_SCAN_RECOVERY_COMPLETE', publicKey }),
+          );
+        } finally {
+          db.close();
+        }
+      })(),
+    );
+    return;
+  }
 
   if (type === 'REGISTER_VIEWING_KEY') {
     event.waitUntil(
