@@ -1,102 +1,18 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import { CopyButton } from '@/components/CopyButton';
 import { NetworkMismatchModal } from '@/components/NetworkMismatchModal';
-import { useStellarWallet } from '@/context/StellarWalletContext';
 import { StellarLink } from '@/components/StellarLink';
-
-type ClaimState = 'idle' | 'signing' | 'claiming' | 'success';
-
-// Mock deposit data - will be replaced with contract calls
-const MOCK_DEPOSITS = [
-  {
-    id: 'vault_1234567890',
-    recipient: 'st:xlm:mock_recipient_1',
-    amount: '10.5',
-    unlockLedger: 500000,
-    refundWindow: 10000,
-    state: 'pending' as const,
-  },
-  {
-    id: 'vault_9876543210',
-    recipient: 'st:xlm:mock_recipient_2',
-    amount: '25.0',
-    unlockLedger: 450000,
-    refundWindow: 10000,
-    state: 'pending' as const,
-  },
-];
-
-type VaultDeposit = {
-  id: string;
-  recipient: string;
-  amount: string;
-  unlockLedger: number;
-  refundWindow: number;
-  state: 'pending' | 'claimed';
-};
+import { useStellarWallet } from '@/context/StellarWalletContext';
+import { useVaultDeposits } from '@/hooks/useVaultDeposits';
+import { getVaultActions, submitVaultAction } from '@/lib/stellar/vaultStatus';
 
 export function StellarVaultClaim() {
-  const { address, signMessage, isNetworkMismatch } = useStellarWallet();
-  const [deposits, setDeposits] = useState<VaultDeposit[]>(MOCK_DEPOSITS);
+  const { address, signTransaction, isNetworkMismatch, freighterNetwork } = useStellarWallet();
+  const { deposits, loading, error, refresh } = useVaultDeposits(address, freighterNetwork);
   const [claimingId, setClaimingId] = useState<string | null>(null);
-  const [claimState, setClaimState] = useState<ClaimState>('idle');
-  const [error, setError] = useState('');
+  const [claimError, setClaimError] = useState('');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [showNetworkModal, setShowNetworkModal] = useState(false);
-
-  const handleClaim = useCallback(
-    async (depositId: string) => {
-      if (!address) {
-        setError('Wallet not connected');
-        return;
-      }
-
-      if (isNetworkMismatch) {
-        setShowNetworkModal(true);
-        return;
-      }
-
-      setClaimingId(depositId);
-      setClaimState('signing');
-      setError('');
-
-      try {
-        // Step 1: Sign message to prove recipient identity
-        const signingMessage = `Claim vault deposit: ${depositId}`;
-        await signMessage(signingMessage);
-
-        setClaimState('claiming');
-
-        // TODO: Integrate with stealth-vault contract when available
-        // For now, simulate the claim flow
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-
-        // Simulate transaction hash
-        const simulatedTxHash = `claim_${depositId}_${Date.now()}`;
-        setTxHash(simulatedTxHash);
-        setClaimState('success');
-
-        // Update deposit state
-        setDeposits((prev) =>
-          prev.map((d) => (d.id === depositId ? { ...d, state: 'claimed' as const } : d)),
-        );
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Claim failed');
-        setClaimState('idle');
-      } finally {
-        setClaimingId(null);
-      }
-    },
-    [address, signMessage, isNetworkMismatch],
-  );
-
-  const reset = () => {
-    setClaimState('idle');
-    setTxHash(null);
-    setError('');
-  };
-
-  const claimableDeposits = deposits.filter((d) => d.state === 'pending');
 
   if (!address) {
     return (
@@ -111,120 +27,77 @@ export function StellarVaultClaim() {
     );
   }
 
-  if (claimState === 'success' && txHash) {
-    return (
-      <div className="flex flex-col gap-5 border border-outline-variant bg-surface-container p-5 sm:p-6">
-        <div className="flex items-center gap-2">
-          <span className="inline-block h-1.5 w-1.5 bg-tertiary"></span>
-          <span className="font-heading text-xs font-semibold uppercase tracking-widest text-on-surface">
-            Claim Successful
-          </span>
-        </div>
+  const claimable = deposits.filter((deposit) => getVaultActions(deposit, address).canClaim);
 
-        <div className="flex flex-col gap-3">
-          <div>
-            <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-              Transaction Hash
-            </span>
-            <StellarLink
-              value={txHash}
-              type="tx"
-              className="mt-0.5 max-w-full"
-              linkClassName="text-xs"
-            />
-          </div>
-        </div>
-
-        <button
-          onClick={reset}
-          className="h-11 w-full border border-outline-variant font-heading text-[13px] font-semibold uppercase tracking-widest text-primary transition-colors hover:bg-surface-bright"
-        >
-          Claim Another
-        </button>
-      </div>
-    );
-  }
-
-  if (claimableDeposits.length === 0) {
-    return (
-      <div className="py-12 text-center">
-        <p className="font-heading text-sm uppercase tracking-widest text-outline">
-          No Claimable Deposits
-        </p>
-        <p className="mt-2 font-body text-xs text-on-surface-variant">
-          No pending vault deposits found for your address.
-        </p>
-      </div>
-    );
-  }
+  const handleClaim = async (depositId: string) => {
+    if (isNetworkMismatch) {
+      setShowNetworkModal(true);
+      return;
+    }
+    setClaimingId(depositId);
+    setClaimError('');
+    try {
+      const hash = await submitVaultAction({
+        action: 'claim',
+        depositId,
+        actor: address,
+        signTransaction,
+      });
+      setTxHash(hash);
+      await refresh();
+    } catch (err) {
+      setClaimError(err instanceof Error ? err.message : 'Claim failed');
+    } finally {
+      setClaimingId(null);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4">
-      {error && <p className="text-sm text-error">{error}</p>}
+      {(claimError || error) && <p className="text-sm text-error">{claimError || error}</p>}
+      {txHash && (
+        <div className="border border-tertiary bg-tertiary/5 p-4">
+          <p className="font-heading text-xs font-semibold uppercase tracking-widest text-tertiary">
+            Claim Confirmed
+          </p>
+          <StellarLink
+            value={txHash}
+            type="tx"
+            className="mt-2 max-w-full"
+            linkClassName="text-xs"
+          />
+        </div>
+      )}
 
-      {claimableDeposits.map((deposit) => (
-        <div
-          key={deposit.id}
-          className="flex flex-col gap-4 border border-outline-variant bg-surface-container p-5"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <div className="mb-2 flex items-center gap-2">
-                <span className="inline-block h-1.5 w-1.5 bg-primary"></span>
-                <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                  Pending
-                </span>
-              </div>
+      {!loading && claimable.length === 0 && !error && (
+        <div className="py-12 text-center">
+          <p className="font-heading text-sm uppercase tracking-widest text-outline">
+            No Claimable Deposits
+          </p>
+          <p className="mt-2 font-body text-xs text-on-surface-variant">
+            The contract has no unlocked deposits authorized for this wallet.
+          </p>
+        </div>
+      )}
 
-              <div className="mb-3">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                  Deposit ID
-                </span>
-                <div className="mt-0.5 flex items-center gap-2">
-                  <span className="font-mono text-xs text-primary">{deposit.id}</span>
-                  <CopyButton text={deposit.id} />
-                </div>
-              </div>
-
-              <div className="mb-3">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                  Amount
-                </span>
-                <div className="mt-0.5 font-heading text-lg font-bold text-on-surface">
-                  {deposit.amount} XLM
-                </div>
-              </div>
-
-              <div className="mb-3">
-                <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                  Unlock Ledger
-                </span>
-                <div className="mt-0.5 font-mono text-xs text-on-surface-variant">
-                  {deposit.unlockLedger.toLocaleString()}
-                </div>
-              </div>
-
-              <div>
-                <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-                  Refund Window
-                </span>
-                <div className="mt-0.5 font-mono text-xs text-on-surface-variant">
-                  {deposit.refundWindow.toLocaleString()} ledgers
-                </div>
-              </div>
-            </div>
+      {claimable.map((deposit) => (
+        <div key={deposit.id} className="border border-outline-variant bg-surface-container p-5">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
+            Deposit ID
+          </span>
+          <div className="mt-1 flex items-center gap-2">
+            <span className="truncate font-mono text-xs text-primary">{deposit.id}</span>
+            <CopyButton text={deposit.id} />
           </div>
-
+          <p className="mt-4 font-heading text-lg font-bold text-on-surface">
+            {deposit.amount} XLM
+          </p>
           <button
-            onClick={() => handleClaim(deposit.id)}
-            disabled={claimingId === deposit.id || claimState !== 'idle'}
-            className="h-11 w-full bg-primary font-heading text-[13px] font-semibold uppercase tracking-widest text-surface transition-colors hover:brightness-110 disabled:opacity-30"
+            onClick={() => void handleClaim(deposit.id)}
+            disabled={claimingId === deposit.id}
+            className="mt-4 h-11 w-full bg-primary font-heading text-[13px] font-semibold uppercase tracking-widest text-surface disabled:opacity-30"
           >
-            {claimingId === deposit.id
-              ? claimState === 'signing'
-                ? 'Signing...'
-                : 'Claiming...'
-              : 'Claim'}
+            {claimingId === deposit.id ? 'Claiming...' : 'Claim'}
           </button>
         </div>
       ))}
