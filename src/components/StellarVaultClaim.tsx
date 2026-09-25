@@ -2,13 +2,24 @@ import { useState } from 'react';
 import { CopyButton } from '@/components/CopyButton';
 import { NetworkMismatchModal } from '@/components/NetworkMismatchModal';
 import { StellarLink } from '@/components/StellarLink';
+import { useStealthKeys } from '@/context/StealthKeysContext';
 import { useStellarWallet } from '@/context/StellarWalletContext';
 import { useVaultDeposits } from '@/hooks/useVaultDeposits';
-import { getVaultActions, submitVaultAction } from '@/lib/stellar/vaultStatus';
+import {
+  deriveVaultClaimSigner,
+  getVaultActions,
+  submitVaultAction,
+  type OnChainVaultDeposit,
+} from '@/lib/stellar/vaultStatus';
 
 export function StellarVaultClaim() {
   const { address, signTransaction, isNetworkMismatch, freighterNetwork } = useStellarWallet();
-  const { deposits, loading, error, refresh } = useVaultDeposits(address, freighterNetwork);
+  const { stellarKeys } = useStealthKeys();
+  const { deposits, loading, error, refresh } = useVaultDeposits(
+    address,
+    freighterNetwork,
+    stellarKeys,
+  );
   const [claimingId, setClaimingId] = useState<string | null>(null);
   const [claimError, setClaimError] = useState('');
   const [txHash, setTxHash] = useState<string | null>(null);
@@ -27,21 +38,27 @@ export function StellarVaultClaim() {
     );
   }
 
-  const claimable = deposits.filter((deposit) => getVaultActions(deposit, address).canClaim);
+  const claimable = deposits.filter(
+    (deposit) => getVaultActions(deposit, address, stellarKeys).canClaim,
+  );
 
-  const handleClaim = async (depositId: string) => {
+  const handleClaim = async (deposit: OnChainVaultDeposit) => {
     if (isNetworkMismatch) {
       setShowNetworkModal(true);
       return;
     }
-    setClaimingId(depositId);
+    setClaimingId(deposit.id);
     setClaimError('');
     try {
+      const claimSigner = deriveVaultClaimSigner(deposit, stellarKeys);
+      if (!claimSigner)
+        throw new Error('This vault deposit does not match the derived stealth key');
       const hash = await submitVaultAction({
         action: 'claim',
-        depositId,
+        depositId: deposit.id,
         actor: address,
         signTransaction,
+        claimSigner,
       });
       setTxHash(hash);
       await refresh();
@@ -93,7 +110,7 @@ export function StellarVaultClaim() {
             {deposit.amount} XLM
           </p>
           <button
-            onClick={() => void handleClaim(deposit.id)}
+            onClick={() => void handleClaim(deposit)}
             disabled={claimingId === deposit.id}
             className="mt-4 h-11 w-full bg-primary font-heading text-[13px] font-semibold uppercase tracking-widest text-surface disabled:opacity-30"
           >

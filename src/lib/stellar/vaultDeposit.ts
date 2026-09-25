@@ -11,6 +11,7 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import {
+  bytesToHex,
   decodeStealthMetaAddress,
   generateStealthAddress,
 } from '@wraith-protocol/sdk/chains/stellar';
@@ -40,6 +41,7 @@ export interface PersistedVaultDeposit {
   txHash: string;
   sender: string;
   recipient: string;
+  ephemeralPubKey: string;
   metaAddress: string;
   amount: string;
   unlockLedger: number;
@@ -189,6 +191,7 @@ export async function submitVaultDeposit(
     txHash: submitted.hash,
     sender: params.sender,
     recipient: stealth.stealthAddress,
+    ephemeralPubKey: bytesToHex(stealth.ephemeralPubKey),
     metaAddress: params.metaAddress,
     amount: params.amount,
     unlockLedger: params.unlockLedger,
