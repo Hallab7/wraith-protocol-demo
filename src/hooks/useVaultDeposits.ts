@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { StealthKeys } from '@wraith-protocol/sdk/chains/stellar';
 import { loadVaultDeposits, type OnChainVaultDeposit } from '@/lib/stellar/vaultStatus';
 
-export function useVaultDeposits(address: string | null, networkKey: string | null) {
+export function useVaultDeposits(
+  address: string | null,
+  networkKey: string | null,
+  stellarKeys: StealthKeys | null = null,
+) {
   const [deposits, setDeposits] = useState<OnChainVaultDeposit[]>([]);
   const [currentLedger, setCurrentLedger] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -15,7 +20,7 @@ export function useVaultDeposits(address: string | null, networkKey: string | nu
     }
     setLoading(true);
     try {
-      const result = await loadVaultDeposits(address);
+      const result = await loadVaultDeposits(address, stellarKeys);
       setDeposits(result.deposits);
       setCurrentLedger(result.currentLedger);
       setError('');
@@ -24,7 +29,7 @@ export function useVaultDeposits(address: string | null, networkKey: string | nu
     } finally {
       setLoading(false);
     }
-  }, [address, networkKey]);
+  }, [address, networkKey, stellarKeys]);
 
   useEffect(() => {
     void refresh();

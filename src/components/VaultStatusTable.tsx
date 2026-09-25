@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { CopyButton } from '@/components/CopyButton';
 import { StellarLink } from '@/components/StellarLink';
+import { useStealthKeys } from '@/context/StealthKeysContext';
 import { useStellarWallet } from '@/context/StellarWalletContext';
 import { useVaultDeposits } from '@/hooks/useVaultDeposits';
 import {
+  deriveVaultClaimSigner,
   getVaultActions,
   submitVaultAction,
+  type OnChainVaultDeposit,
   type VaultDepositState,
 } from '@/lib/stellar/vaultStatus';
 
@@ -39,9 +42,11 @@ const stateColors: Record<VaultDepositState, string> = {
 
 export function VaultStatusTable() {
   const { address, signTransaction, freighterNetwork, isNetworkMismatch } = useStellarWallet();
+  const { stellarKeys } = useStealthKeys();
   const { deposits, currentLedger, loading, error, refresh } = useVaultDeposits(
     address,
     freighterNetwork,
+    stellarKeys,
   );
   const [actionId, setActionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
@@ -60,19 +65,24 @@ export function VaultStatusTable() {
     );
   }
 
-  const runAction = async (action: 'claim' | 'refund', depositId: string) => {
+  const runAction = async (action: 'claim' | 'refund', deposit: OnChainVaultDeposit) => {
     if (isNetworkMismatch) {
       setActionError('Switch Freighter to Stellar Testnet before continuing');
       return;
     }
-    setActionId(depositId);
+    setActionId(deposit.id);
     setActionError('');
     try {
+      const claimSigner = action === 'claim' ? deriveVaultClaimSigner(deposit, stellarKeys) : null;
+      if (action === 'claim' && !claimSigner) {
+        throw new Error('This vault deposit does not match the derived stealth key');
+      }
       const hash = await submitVaultAction({
         action,
-        depositId,
+        depositId: deposit.id,
         actor: address,
         signTransaction,
+        ...(claimSigner ? { claimSigner } : {}),
       });
       setTxHash(hash);
       await refresh();
@@ -119,7 +129,7 @@ export function VaultStatusTable() {
       )}
 
       {deposits.map((deposit) => {
-        const actions = getVaultActions(deposit, address);
+        const actions = getVaultActions(deposit, address, stellarKeys);
         return (
           <div
             key={deposit.id}
@@ -181,7 +191,7 @@ export function VaultStatusTable() {
 
             {actions.canClaim && (
               <button
-                onClick={() => void runAction('claim', deposit.id)}
+                onClick={() => void runAction('claim', deposit)}
                 disabled={actionId === deposit.id}
                 className="h-11 w-full bg-primary font-heading text-[13px] font-semibold uppercase tracking-widest text-surface disabled:opacity-30"
               >
@@ -190,7 +200,7 @@ export function VaultStatusTable() {
             )}
             {actions.canRefund && (
               <button
-                onClick={() => void runAction('refund', deposit.id)}
+                onClick={() => void runAction('refund', deposit)}
                 disabled={actionId === deposit.id}
                 className="h-11 w-full border border-error bg-error/5 font-heading text-[13px] font-semibold uppercase tracking-widest text-error disabled:opacity-30"
               >

@@ -1,18 +1,32 @@
 import {
   Account,
   Address,
+  authorizeEntry,
   BASE_FEE,
   Contract,
+  hash,
+  Operation,
   TransactionBuilder,
   rpc,
   scValToNative,
   xdr,
 } from '@stellar/stellar-sdk';
+import {
+  computeSharedSecret,
+  deriveStealthPrivateScalar,
+  deriveStealthPubKey,
+  hashToScalar,
+  hexToBytes,
+  pubKeyToStellarAddress,
+  signStellarTransaction,
+  type StealthKeys,
+} from '@wraith-protocol/sdk/chains/stellar';
 import { Buffer } from 'buffer';
 import { STELLAR_NETWORK } from '@/config';
+import { loadPersistedVaultDeposits } from '@/lib/stellar/vaultDeposit';
 
 const EVENT_LOOKBACK_LEDGERS = 17_280;
-const DUMMY_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWH';
+const DUMMY_ACCOUNT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 
 export type VaultDepositState =
   | 'pending'
@@ -26,6 +40,7 @@ export interface OnChainVaultDeposit {
   id: string;
   sender: string;
   recipient: string;
+  ephemeralPubKey: string;
   amount: string;
   asset: string;
   unlockLedger: number;
@@ -33,6 +48,12 @@ export interface OnChainVaultDeposit {
   createdLedger: number;
   txHash: string;
   state: VaultDepositState;
+}
+
+export interface VaultClaimSigner {
+  address: string;
+  privateScalar: bigint;
+  publicKey: Uint8Array;
 }
 
 type TerminalState = 'claimed' | 'refunded';
@@ -47,7 +68,7 @@ type VaultServer = {
   assembleTransaction?: (
     transaction: unknown,
     simulation: unknown,
-  ) => { build(): { toXDR(): string } } | Promise<{ build(): { toXDR(): string } }>;
+  ) => TransactionBuilder | Promise<TransactionBuilder>;
 };
 
 function runtimeWindow() {
@@ -81,6 +102,13 @@ function normalizeDepositId(value: unknown): string {
   const text = valueToString(native).replace(/^0x/, '');
   if (/^[0-9a-f]{64}$/i.test(text)) return text.toLowerCase();
   throw new Error('Vault event contained an invalid deposit ID');
+}
+
+function bytesToHexValue(value: unknown): string {
+  const native = toNative(value);
+  if (native instanceof Uint8Array) return Buffer.from(native).toString('hex');
+  const text = valueToString(native).replace(/^0x/, '');
+  return /^[0-9a-f]{64}$/i.test(text) ? text.toLowerCase() : '';
 }
 
 function toNative(value: unknown): unknown {
@@ -119,9 +147,40 @@ export function deriveVaultState(
   return 'expired';
 }
 
-export function getVaultActions(deposit: OnChainVaultDeposit, address: string) {
+export function deriveVaultClaimSigner(
+  deposit: OnChainVaultDeposit,
+  keys: StealthKeys | null,
+): VaultClaimSigner | null {
+  if (!keys || typeof keys.spendingScalar !== 'bigint' || !deposit.ephemeralPubKey) return null;
+
+  try {
+    const ephemeralPubKey = hexToBytes(deposit.ephemeralPubKey);
+    const hashScalar = hashToScalar(computeSharedSecret(keys.viewingKey, ephemeralPubKey));
+    const publicKey = deriveStealthPubKey(keys.spendingPubKey, hashScalar);
+    const address = pubKeyToStellarAddress(publicKey);
+    if (address !== deposit.recipient) return null;
+
+    return {
+      address,
+      privateScalar: deriveStealthPrivateScalar(
+        keys.spendingScalar,
+        keys.viewingKey,
+        ephemeralPubKey,
+      ),
+      publicKey,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function getVaultActions(
+  deposit: OnChainVaultDeposit,
+  address: string,
+  keys: StealthKeys | null = null,
+) {
   return {
-    canClaim: deposit.state === 'claimable' && deposit.recipient === address,
+    canClaim: deposit.state === 'claimable' && deriveVaultClaimSigner(deposit, keys) !== null,
     canRefund: deposit.state === 'expired' && deposit.sender === address,
   };
 }
@@ -150,7 +209,10 @@ async function readActiveDeposit(
   return toRecord(simulation.result.retval);
 }
 
-export async function loadVaultDeposits(address: string): Promise<{
+export async function loadVaultDeposits(
+  address: string,
+  keys: StealthKeys | null = null,
+): Promise<{
   currentLedger: number;
   deposits: OnChainVaultDeposit[];
 }> {
@@ -168,6 +230,19 @@ export async function loadVaultDeposits(address: string): Promise<{
 
   const deposits = new Map<string, Partial<OnChainVaultDeposit>>();
   const terminalStates = new Map<string, TerminalState>();
+
+  for (const persisted of loadPersistedVaultDeposits(address)) {
+    deposits.set(persisted.depositId, {
+      id: persisted.depositId,
+      sender: persisted.sender,
+      recipient: persisted.recipient,
+      ephemeralPubKey: persisted.ephemeralPubKey,
+      amount: persisted.amount,
+      unlockLedger: persisted.unlockLedger,
+      refundAfter: persisted.refundAfter,
+      txHash: persisted.txHash,
+    });
+  }
 
   for (const event of response.events ?? []) {
     const eventName = valueToString(toNative(event.topic?.[0]));
@@ -224,11 +299,15 @@ export async function loadVaultDeposits(address: string): Promise<{
       const refundAfter = Number(entry.refund_after ?? entry.refundAfter ?? 0);
       const amount =
         entry.amount !== undefined ? stroopsToXlm(entry.amount) : valueToString(deposit.amount);
+      const ephemeralPubKey = bytesToHexValue(
+        entry.ephemeral_pub_key ?? entry.ephemeralPubKey ?? deposit.ephemeralPubKey,
+      );
 
       return {
         id,
         sender,
         recipient,
+        ephemeralPubKey,
         amount,
         asset: valueToString(entry.asset ?? deposit.asset),
         unlockLedger,
@@ -249,26 +328,90 @@ export async function loadVaultDeposits(address: string): Promise<{
   return {
     currentLedger,
     deposits: resolved
-      .filter((deposit) => deposit.sender === address || deposit.recipient === address)
+      .filter(
+        (deposit) => deposit.sender === address || deriveVaultClaimSigner(deposit, keys) !== null,
+      )
       .sort((a, b) => b.createdLedger - a.createdLedger),
   };
 }
 
-export async function submitVaultAction(params: {
+type SubmitVaultActionParams = {
   action: 'claim' | 'refund';
   depositId: string;
   actor: string;
   signTransaction: (xdr: string) => Promise<string>;
-}): Promise<string> {
+  claimSigner?: VaultClaimSigner;
+};
+
+async function addClaimAuthorization(
+  transaction: ReturnType<TransactionBuilder['build']>,
+  signer: VaultClaimSigner,
+  validUntilLedger: number,
+): Promise<ReturnType<TransactionBuilder['build']>> {
+  const operation = transaction.operations[0];
+  if (operation?.type !== 'invokeHostFunction' || !operation.auth?.length) {
+    throw new Error('Vault claim simulation did not return recipient authorization');
+  }
+
+  let matchedEntry = false;
+  const auth = await Promise.all(
+    operation.auth.map(async (entry) => {
+      const credentials = entry.credentials();
+      if (credentials.switch().name !== 'sorobanCredentialsAddress') return entry;
+
+      const entryAddress = Address.fromScAddress(credentials.address().address()).toString();
+      if (entryAddress !== signer.address) return entry;
+      matchedEntry = true;
+
+      return authorizeEntry(
+        entry,
+        async (preimage) => ({
+          signature: signStellarTransaction(
+            hash(preimage.toXDR()),
+            signer.privateScalar,
+            signer.publicKey,
+          ),
+          publicKey: signer.address,
+        }),
+        validUntilLedger,
+        STELLAR_NETWORK.networkPassphrase,
+      );
+    }),
+  );
+
+  if (!matchedEntry) {
+    throw new Error('Vault claim simulation did not request the matched stealth recipient');
+  }
+
+  const rebuiltOperation = Operation.invokeHostFunction({
+    func: operation.func,
+    auth,
+    ...(operation.source ? { source: operation.source } : {}),
+  });
+  return TransactionBuilder.cloneFrom(transaction)
+    .clearOperations()
+    .addOperation(rebuiltOperation)
+    .build();
+}
+
+export async function submitVaultAction(params: SubmitVaultActionParams): Promise<string> {
   const contractId = getVaultStatusContractId();
   if (!contractId) throw new Error('Stealth vault contract is not configured for Stellar Testnet');
 
   const server = getServer();
   const sourceAccount = await server.getAccount(params.actor);
   const depositId = xdr.ScVal.scvBytes(Buffer.from(params.depositId, 'hex'));
+  const claimSigner = params.claimSigner;
+  if (params.action === 'claim' && !claimSigner) {
+    throw new Error('A matched stealth key is required to claim');
+  }
   const operation =
     params.action === 'claim'
-      ? new Contract(contractId).call('claim', depositId, new Address(params.actor).toScVal())
+      ? new Contract(contractId).call(
+          'claim',
+          depositId,
+          new Address(claimSigner!.address).toScVal(),
+        )
       : new Contract(contractId).call('refund', depositId);
   const transaction = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
@@ -282,7 +425,16 @@ export async function submitVaultAction(params: {
   const assembled = server.assembleTransaction
     ? await server.assembleTransaction(transaction, simulation)
     : rpc.assembleTransaction(transaction, simulation);
-  const signedXdr = await params.signTransaction(assembled.build().toXDR());
+  let assembledTransaction = assembled.build();
+  if (params.action === 'claim') {
+    const latest = await server.getLatestLedger();
+    assembledTransaction = await addClaimAuthorization(
+      assembledTransaction,
+      claimSigner!,
+      latest.sequence + 100,
+    );
+  }
+  const signedXdr = await params.signTransaction(assembledTransaction.toXDR());
   const submitted = await server.sendTransaction(
     TransactionBuilder.fromXDR(signedXdr, STELLAR_NETWORK.networkPassphrase),
   );
