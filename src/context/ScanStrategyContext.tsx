@@ -28,14 +28,31 @@ function getInitialStrategy(): ScanStrategy {
 }
 
 export function ScanStrategyProvider({ children }: { children: ReactNode }) {
-  const [strategy, setStrategy] = useState<ScanStrategy>(getInitialStrategy);
+  const [strategyState, setStrategyState] = useState<ScanStrategy>(getInitialStrategy);
+
+  const setStrategy = (newStrategy: ScanStrategy) => {
+    localStorage.setItem(SCAN_STRATEGY_STORAGE_KEY, newStrategy);
+    setStrategyState(newStrategy);
+  };
 
   useEffect(() => {
-    localStorage.setItem(SCAN_STRATEGY_STORAGE_KEY, strategy);
-  }, [strategy]);
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === SCAN_STRATEGY_STORAGE_KEY) {
+        if (e.newValue && isScanStrategy(e.newValue)) {
+          setStrategyState(e.newValue);
+        } else {
+          setStrategyState(DEFAULT_SCAN_STRATEGY);
+        }
+      } else if (e.key === null) {
+        setStrategyState(DEFAULT_SCAN_STRATEGY);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
 
   return (
-    <ScanStrategyContext.Provider value={{ strategy, setStrategy }}>
+    <ScanStrategyContext.Provider value={{ strategy: strategyState, setStrategy }}>
       {children}
     </ScanStrategyContext.Provider>
   );

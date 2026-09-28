@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   getLabels,
   saveLabel as storageSaveLabel,
@@ -26,6 +26,22 @@ export function useStealthLabels(walletPubkey: string | null) {
       setLabels(getLabels(walletPubkey));
     }
   }, [walletPubkey]);
+
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === null) {
+        if (walletPubkey) setLabels({});
+        setPrivacyWarningDismissed(false);
+      } else if (e.key === 'wraith:labels:privacy-warning-shown') {
+        setPrivacyWarningDismissed(e.newValue === 'true');
+      } else if (walletPubkey && e.key.startsWith(`${walletPubkey}:`)) {
+        refresh();
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [walletPubkey, refresh]);
 
   const saveLabel = useCallback(
     (stealthAddress: string, label: string, tags: string[]) => {
