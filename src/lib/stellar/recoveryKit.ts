@@ -78,6 +78,7 @@ export function validatePassphrase(passphrase: string): PassphraseStrength {
 export function generateRecoveryFilename(metaAddress: string): string {
   const prefix = metaAddress
     .replace(/^st:[a-z]+:/i, '')
+    .replace(/^0x/i, '')
     .replace(/[^a-zA-Z0-9]/g, '')
     .slice(0, 12);
   const cleanPrefix = prefix || 'stealth';
