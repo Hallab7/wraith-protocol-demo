@@ -5,8 +5,8 @@ import '@/i18n';
 import { StrictMode, useState, useMemo, type CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
 
-// Service worker registration is handled automatically by vite-plugin-pwa (injectRegister: 'auto').
 // The unified app-sw.ts merges PWA precache/routing with Stellar notification sync.
+// It is registered in prompt mode by useAppUpdate (see src/hooks/useAppUpdate.ts).
 import { BrowserRouter } from 'react-router-dom';
 import { WagmiProvider } from 'wagmi';
 import { RainbowKitProvider, darkTheme, lightTheme } from '@rainbow-me/rainbowkit';

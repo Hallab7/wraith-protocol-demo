@@ -71,7 +71,13 @@ export default defineConfig({
       },
 
       manifestFilename: 'manifest.webmanifest',
-      injectRegister: 'auto',
+      // 'prompt' registers the worker without calling skipWaiting, so a waiting
+      // update is surfaced to the user instead of swapping the app underneath
+      // them. `injectRegister: null` disables the auto-injected register script;
+      // registration happens in src/hooks/useAppUpdate.ts via
+      // `virtual:pwa-register` so the prompt is driven by app state.
+      registerType: 'prompt',
+      injectRegister: null,
 
       // injectManifest config: controls what gets injected into self.__WB_MANIFEST
       injectManifest: {

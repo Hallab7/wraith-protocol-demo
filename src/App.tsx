@@ -4,6 +4,7 @@ import { Header } from '@/components/Header';
 import { AutoSign } from '@/components/AutoSign';
 import { TelemetryBanner } from '@/components/TelemetryBanner';
 import { OfflineBanner } from '@/components/OfflineBanner';
+import { UpdatePrompt } from '@/components/UpdatePrompt';
 import Send from '@/pages/Send';
 import Receive from '@/pages/Receive';
 import Privacy from '@/pages/Privacy';
@@ -174,6 +175,7 @@ export function App() {
   return (
     <div className="flex min-h-screen flex-col">
       <Header />
+      <UpdatePrompt />
       <OfflineBanner />
       <TelemetryBanner />
       <AutoSign />

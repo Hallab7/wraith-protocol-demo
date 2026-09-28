@@ -1,17 +1,32 @@
 /// <reference lib="webworker" />
 /// <reference path="../vite-env.d.ts" />
 import { cleanupOutdatedCaches, precacheAndRoute } from 'workbox-precaching';
+import { setCacheNameDetails } from 'workbox-core';
 import { registerRoute } from 'workbox-routing';
 import { NetworkFirst, CacheFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
+import { CACHE_PREFIX, CACHE_VERSION_SUFFIX, cacheName, purgeObsoleteCaches } from '../lib/swCache';
 
 declare const self: ServiceWorkerGlobalScope;
+
+// ─── Explicit cache versioning ─────────────────────────────────────────────────
+// Every cache this worker owns is named `wraith-<kind>-v<CACHE_VERSION>`. The
+// version lives in the name, so a cache-schema change writes to a fresh cache
+// and deletes the old one during activation instead of mutating entries in
+// place. Bump CACHE_VERSION in src/lib/swCache.ts to migrate.
+setCacheNameDetails({
+  prefix: CACHE_PREFIX,
+  suffix: CACHE_VERSION_SUFFIX,
+  precache: 'precache',
+  runtime: 'runtime',
+});
 
 // ─── Workbox precache ──────────────────────────────────────────────────────────
 // vite-plugin-pwa injects the manifest list here at build time.
 // In dev mode (when devOptions.enabled=true) this is an empty array.
 precacheAndRoute(self.__WB_MANIFEST);
+// Removes precaches carrying build-time revisions of earlier Workbox versions.
 cleanupOutdatedCaches();
 
 // ─── Runtime caching ──────────────────────────────────────────────────────────
@@ -25,7 +40,7 @@ const RPC_HOSTNAMES = [
 registerRoute(
   ({ url }) => RPC_HOSTNAMES.some((h) => url.hostname.includes(h)),
   new NetworkFirst({
-    cacheName: 'rpc-cache',
+    cacheName: cacheName('rpc'),
     networkTimeoutSeconds: 10,
     plugins: [
       new ExpirationPlugin({ maxEntries: 50, maxAgeSeconds: 60 }),
@@ -38,7 +53,7 @@ registerRoute(
 registerRoute(
   /^https:\/\/fonts\.googleapis\.com\/.*/i,
   new CacheFirst({
-    cacheName: 'google-fonts-cache',
+    cacheName: cacheName('fonts-styles'),
     plugins: [
       new ExpirationPlugin({ maxEntries: 10, maxAgeSeconds: 31536000 }),
       new CacheableResponsePlugin({ statuses: [0, 200] }),
@@ -50,7 +65,7 @@ registerRoute(
 registerRoute(
   /^https:\/\/fonts\.gstatic\.com\/.*/i,
   new CacheFirst({
-    cacheName: 'google-fonts-webfonts',
+    cacheName: cacheName('fonts-files'),
     plugins: [
       new ExpirationPlugin({ maxEntries: 30, maxAgeSeconds: 31536000 }),
       new CacheableResponsePlugin({ statuses: [0, 200] }),
@@ -206,32 +221,40 @@ async function handleSync(): Promise<void> {
 
 // ── SW lifecycle ───────────────────────────────────────────────────────────────
 
-self.addEventListener('install', (event) => {
-  console.log('[app-sw] Installing — skip waiting');
-  event.waitUntil(self.skipWaiting());
-});
+// No `skipWaiting()` in `install` on purpose. A newly installed worker stays in
+// the `waiting` state until the page posts SKIP_WAITING (the "Reload" action in
+// the update prompt), so a deploy can never swap the app underneath an in-flight
+// transaction. A first install activates without waiting for anything.
+
+async function registerPeriodicSync(): Promise<void> {
+  if (!('periodicSync' in self.registration)) return;
+
+  try {
+    await (
+      self.registration as ServiceWorkerRegistration & {
+        periodicSync: { register(tag: string, opts: object): Promise<void> };
+      }
+    ).periodicSync.register(SYNC_TAG, {
+      minInterval: SYNC_INTERVAL_MINUTES * 60 * 1000,
+    });
+    console.log('[app-sw] Periodic sync registered');
+  } catch (error) {
+    console.error('[app-sw] Failed to register periodic sync:', error);
+  }
+}
 
 self.addEventListener('activate', (event) => {
   console.log('[app-sw] Activating');
   event.waitUntil(
     Promise.all([
       self.clients.claim(),
-      (async () => {
-        if ('periodicSync' in self.registration) {
-          try {
-            await (
-              self.registration as ServiceWorkerRegistration & {
-                periodicSync: { register(tag: string, opts: object): Promise<void> };
-              }
-            ).periodicSync.register(SYNC_TAG, {
-              minInterval: SYNC_INTERVAL_MINUTES * 60 * 1000,
-            });
-            console.log('[app-sw] Periodic sync registered');
-          } catch (error) {
-            console.error('[app-sw] Failed to register periodic sync:', error);
-          }
-        }
-      })(),
+      // Drop every cache this app owns that is not part of the running version:
+      // superseded versions, newer versions left behind by a roll-back, and
+      // caches written by installs that predate explicit versioning.
+      purgeObsoleteCaches(self.caches).then((deleted) => {
+        if (deleted.length > 0) console.log('[app-sw] Purged obsolete caches:', deleted);
+      }),
+      registerPeriodicSync(),
     ]),
   );
 });
