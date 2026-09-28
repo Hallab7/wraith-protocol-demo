@@ -1,5 +1,8 @@
 <!doctype html>
-<html lang="en">
+<!-- Hidden until the inline script below has applied the stored theme, which
+     prevents a flash of the wrong theme. The script reveals <html>, so the
+     guard must live on <html> — hiding <body> would leave the app invisible. -->
+<html lang="en" style="visibility: hidden">
   <head>
     <script>
       (function () {
@@ -109,7 +112,7 @@
       rel="stylesheet"
     />
   </head>
-  <body class="bg-surface text-on-surface" style="visibility: hidden">
+  <body class="bg-surface text-on-surface">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
