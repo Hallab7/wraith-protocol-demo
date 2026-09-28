@@ -2,7 +2,12 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { STELLAR_NETWORK } from '@/config';
 
-export type ActivityKind = 'stealth-send' | 'stealth-receive' | 'withdrawal' | 'name-registration';
+export type ActivityKind =
+  | 'stealth-send'
+  | 'stealth-receive'
+  | 'withdrawal'
+  | 'name-registration'
+  | 'vault-claim';
 export type ActivityStatus = 'pending' | 'confirmed' | 'failed';
 export type ActivityDirection = 'in' | 'out';
 

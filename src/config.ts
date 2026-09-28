@@ -34,6 +34,10 @@ export const STELLAR_NETWORK = {
   horizonUrl: 'https://horizon-testnet.stellar.org',
 } as const;
 
+// The stealth-vault contract has no fixed testnet deployment yet — operators
+// configure it per environment once it ships (see wraith-protocol/contracts#48).
+export const STELLAR_VAULT_CONTRACT_ID = import.meta.env.VITE_STELLAR_VAULT_CONTRACT_ID || '';
+
 export const SOLANA_NETWORK = {
   name: 'Solana Devnet',
   rpcUrl: 'https://api.devnet.solana.com',
